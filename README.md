@@ -12,13 +12,13 @@ Personal collection of agentic skills for Claude Code, Antigravity, Cursor, Code
 
 ```bash
 # Using npx
-npx skills add anc13nt/perks
+npx skills add idrevnii/perks
 
 # Using bunx
-bunx skills add anc13nt/perks
+bunx skills add idrevnii/perks
 
 # Install specific skill only
-npx skills add anc13nt/perks --skill "deep-plan"
+npx skills add idrevnii/perks --skill "deep-plan"
 ```
 
 ## Compatibility
