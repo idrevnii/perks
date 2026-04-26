@@ -15,7 +15,7 @@ Before changing TypeScript or TSX:
 2. Inspect the existing code shape before deciding on abstractions, dependencies, or file layout.
 3. Make the smallest change that fully solves the request.
 4. Keep runtime boundaries explicit: parse untrusted data at the edge, then pass trusted typed values inward.
-5. Run the deterministic checks the project supports, such as typecheck, lint, focused tests, or format checks.
+5. Run the deterministic checks the project supports (typecheck, lint, focused tests, format checks). If any check fails, fix the failure before considering the change complete — do not leave the codebase in a broken state. If a check cannot be run in the current environment, note what was verified manually and what risk remains.
 
 When reviewing TypeScript, lead with behavioral risks, broken contracts, weak validation, async/state bugs, missing tests, and type unsoundness. Keep style-only observations secondary unless they hide a real maintenance risk.
 
@@ -34,9 +34,7 @@ Types should make invalid states harder to express, but they should not hide sim
 
 ## Change Shape
 
-Make the smallest change that fully solves the problem.
-
-Prefer changes that are easy to review, easy to revert, and easy to explain.
+Make the smallest change that fully solves the problem. Prefer changes that are easy to review, easy to revert, and easy to explain.
 
 - Keep edits scoped to the requested behavior.
 - Avoid unrelated refactors while changing behavior.
@@ -70,20 +68,18 @@ Use TypeScript to model domain facts, not to decorate JavaScript.
 - Avoid `any`; use `unknown` at boundaries and narrow it deliberately.
 - Avoid type assertions unless they are close to a runtime check or a well-documented external guarantee.
 - Do not use clever generic types when a simple explicit type is clearer.
-- Let schemas define contracts at runtime boundaries, and infer TypeScript types from those schemas when the schema is the source of truth.
-- Do not duplicate the same contract as both a hand-written type and a schema unless there is a clear reason.
+- Let schemas define contracts at runtime boundaries, and infer TypeScript types from those schemas when the schema is the source of truth. Do not duplicate the same contract as both a hand-written type and a schema without a clear reason.
 
 ## Null And Undefined
 
 Use `undefined` for absence inside application code.
 
-- Prefer optional properties like `foo?: number` over `foo: number | null`.
+- Prefer optional properties (`foo?: number`) over `foo: number | null`.
 - Use `null` only when the external contract, database, protocol, or API explicitly distinguishes `null` from absence.
-- Keep raw boundary schemas faithful to external data: if an API can return `null`, parse it as `null`.
 - Normalize external `null` values to internal `undefined` at the boundary when the application does not need to preserve the distinction.
 - Do not pass `null` deeper into domain code just because an external API used it.
-- Do not blindly erase `null` when it carries meaning, such as "explicitly cleared", "known empty", or "intentionally unset".
-- Prefer `exactOptionalPropertyTypes` when the codebase can support it, so `foo?: T` means the property may be absent rather than casually assigned `undefined`.
+- Do not blindly erase `null` when it carries meaning, such as "explicitly cleared" or "intentionally unset".
+- Prefer `exactOptionalPropertyTypes` when the codebase can support it.
 
 ## Functions And Control Flow
 
@@ -105,7 +101,7 @@ Write functions that make the happy path and failure paths obvious.
 Choose the error shape by how callers can respond.
 
 - Throw for programmer errors, violated invariants, and failures the current layer cannot reasonably recover from.
-- Use a local typed union for expected domain outcomes that callers should branch on, such as validation failures, unavailable resources, declined actions, or recoverable external failures.
+- Use a local typed union for expected domain outcomes that callers should branch on: validation failures, unavailable resources, declined actions, or recoverable external failures.
 - Do not introduce a Result library or rewrite an exception-based codebase around `Result` unless the codebase already uses that style or the benefit is concrete and broad.
 - Do not wrap every function in a `Result` type by default; use typed outcomes only when the caller has meaningful recovery branches.
 - Do not return `null` or `undefined` as a vague failure signal. Use a named union variant or throw.
@@ -114,37 +110,56 @@ Choose the error shape by how callers can respond.
 - Keep user-facing error messages separate from diagnostic details when security or UX matters.
 - At process, request, and job boundaries, convert unknown thrown values into structured errors.
 
-Example:
+Example — typed domain outcome:
 
 ```ts
 type CreateUserOutcome =
   | { status: "created"; user: User }
   | { status: "email_taken" }
   | { status: "invalid_invite" };
+
+async function createUser(input: CreateUserInput): Promise<CreateUserOutcome> {
+  const isEmailTaken = await isEmailExists(input.email)
+  if (isEmailTaken) return { status: "email_taken" };
+  if (!isValidInvite(input.inviteCode)) return { status: "invalid_invite" };
+  const user = await db.users.insert(input);
+  return { status: "created", user };
++}
 ```
 
 ## Runtime Boundaries And Validation
 
 Static types stop at runtime boundaries. Validate data when it enters the system.
 
-Validate:
-
-- HTTP request bodies, params, query strings, and headers when used for behavior.
-- External API responses before relying on their shape.
-- Environment variables before application startup continues.
-- Persisted JSON blobs when reading them back.
-- Job, queue, message, webhook, and event payloads.
-- AI/model/tool outputs before treating them as structured data.
+Validate: HTTP request bodies, params, query strings, and headers; external API responses; environment variables before startup; persisted JSON blobs; job, queue, and event payloads; AI/model outputs before treating them as structured data.
 
 Guidelines:
 
 - Use a schema library such as Zod, Valibot, ArkType, or the project's existing choice; do not mix validation libraries casually.
 - Keep boundary schemas close to the boundary or domain that owns the contract.
 - Parse once at the edge, then pass trusted typed values inward.
-- Preserve raw external payloads when auditability or debugging matters.
 - Normalize awkward external shapes into cleaner internal types at the boundary.
 - Do not repeatedly re-validate trusted internal values through every layer.
 - Prefer explicit schema failures over defensive optional chaining deep in domain code.
+- Preserve raw external payloads when auditability or debugging matters.
+
+Example — Zod boundary validation:
+
+```ts
+import { z } from "zod";
+
+const WebhookPayloadSchema = z.object({
+  eventType: z.enum(["order.created", "order.cancelled"]),
+  orderId: z.string().uuid(),
+  occurredAt: z.string().datetime(),
+});
+
+type WebhookPayload = z.infer<typeof WebhookPayloadSchema>;
+
+export function parseWebhookPayload(raw: unknown): WebhookPayload {
+  return WebhookPayloadSchema.parse(raw); // throws ZodError with field-level detail on failure
+}
+```
 
 ## Async, Effects, And State
 
@@ -153,20 +168,19 @@ Make side effects visible and intentional.
 - Keep network, filesystem, database, clock, random, and process-level effects near adapters or clearly named functions.
 - Pass dependencies explicitly when it improves testability or makes effects clearer.
 - Avoid hidden module-level mutable state unless it is truly process-wide configuration or a managed cache.
-- Treat time and randomness as dependencies in domain logic.
 - Use `async`/`await` for readable control flow; use promise chains only when they are clearer for composition.
 - Always handle or return promises; do not leave floating promises.
-- Use cancellation, timeouts, or abort signals for external calls when the runtime path can hang or outlive its caller.
+- Use cancellation, timeouts, or abort signals for external calls when the path can hang or outlive its caller.
 - Make retries, backoff, and idempotency explicit around external side effects.
 - Be careful with `Promise.all`: it is for independent work, not work that depends on sequencing or shared mutation.
-- Keep derived state derived; do not store duplicate mutable state unless there is a clear synchronization plan.
+- Keep derived state derived; do not store duplicate mutable state without a clear synchronization plan.
 
 ## Data Modeling And Persistence
 
 Do not pretend that every layer has the same data shape.
 
 - Distinguish external DTOs, persistence records, domain objects, and UI/view models when their meanings differ.
-- Avoid one giant `User`, `Order`, or `Config` type that is reused across unrelated boundaries.
+- Avoid one giant `User`, `Order`, or `Config` type reused across unrelated boundaries.
 - Store durable data with enough version, timestamp, and source metadata to explain where it came from.
 - Treat persisted historical inputs and raw external outputs as append-only unless the domain explicitly allows correction.
 - Prefer explicit migrations or transformation functions when a stored shape changes.
@@ -181,22 +195,19 @@ Names should make code review easier.
 
 - Use domain nouns and verbs rather than generic technical verbs.
 - Prefer `calculateInvoiceTotal`, `parseWebhookPayload`, or `selectVisibleItems` over `processData`, `handleResult`, or `formatPayload`.
-- Name booleans as predicates, such as `isArchived`, `hasPermission`, or `shouldRetry`.
+- Name booleans as predicates: `isArchived`, `hasPermission`, `shouldRetry`.
 - Name functions by the observable action they perform or value they return.
 - Avoid names that describe implementation mechanics instead of intent.
 - Avoid vague suffixes like `Manager`, `Service`, `Helper`, `Util`, `Processor`, and `Handler` unless the domain meaning is still clear.
 - Do not use abbreviations unless they are established in the domain or codebase.
-- Keep comments for why, tradeoffs, invariants, and non-obvious constraints; do not comment what the code already says.
-- When code needs a long comment to explain control flow, consider reshaping the code first.
+- Keep comments for why, tradeoffs, invariants, and non-obvious constraints — not for what the TypeScript already makes clear from types and names.
 
 ## Imports, Modules, And Dependencies
 
 Make module relationships explicit and boring.
 
-- Prefer named exports for application code.
-- Avoid default exports except where the framework or existing convention expects them.
-- Avoid broad `export *` barrel files that hide ownership or expose internals.
-- A barrel is acceptable when it is a narrow, intentional public API for a module.
+- Prefer named exports for application code. Avoid default exports except where the framework or existing convention expects them.
+- Avoid broad `export *` barrel files that hide ownership or expose internals. A barrel is acceptable when it is a narrow, intentional public API for a module.
 - Keep dependency direction clear: framework glue may call domain code, but domain code should not import framework glue.
 - Do not introduce a package for something the standard library or existing dependency already handles well.
 - Do not add dependencies for tiny helpers.
@@ -214,7 +225,6 @@ Use tests and tooling to protect behavior, not to decorate the repo.
 - Test public behavior and important invariants more than private implementation details.
 - Mock at external boundaries; avoid mocking the function you are trying to prove.
 - For UI code, test user-visible behavior and accessibility-relevant states instead of component internals.
-- Use typecheck, lint, format checks, and focused tests before review when the project supports them.
 - Keep tests deterministic: control time, randomness, network, filesystem, and concurrency.
 - Do not chase coverage numbers before the core behavior is trustworthy.
 - If a change cannot be tested cheaply, explain what was verified manually and what risk remains.
@@ -223,13 +233,10 @@ Use tests and tooling to protect behavior, not to decorate the repo.
 
 Prefer code that fits in a reviewer's head.
 
-- Keep functions short enough that their responsibility, inputs, outputs, and failure modes are obvious.
-- Split long code by domain steps, not by arbitrary technical phases.
-- Do not extract a function unless its name adds meaning or it removes real duplication.
+- Keep functions focused enough that their responsibility, inputs, outputs, and failure modes are obvious at a glance.
 - Avoid deeply nested conditionals; use guard clauses, discriminated unions, or small named steps.
-- Keep route handlers, controllers, components, jobs, and command handlers thin enough that the workflow is visible.
-- Large files are acceptable for schemas, generated code, migrations, constants, cohesive domain tables, or domain-owned `types.ts` files.
-- A large `types.ts` is acceptable when the types belong to one clear domain owner; split it when unrelated domains start accumulating there.
+- Do not extract a function unless its name adds meaning or it removes real duplication.
+- Large files are acceptable for schemas, generated code, migrations, constants, or domain-owned `types.ts` files.
 - When a file grows too large, split by ownership and behavior rather than creating `helpers.ts`.
 - As a rough review signal, reconsider ordinary source files above 300 lines and ordinary functions above 50 lines.
 
@@ -239,19 +246,41 @@ Configuration should fail early and be typed after startup.
 
 - Parse and validate environment variables at the application boundary.
 - Export a typed config object instead of reading `process.env` throughout the codebase.
-- Do not use non-null assertions like `process.env.API_KEY!` outside the config loader.
 - Convert strings to domain types early: numbers, booleans, URLs, enums, durations, and feature flags.
 - Keep secrets out of logs, errors, snapshots, and client bundles.
 - Make defaults explicit. Avoid hidden fallback behavior for important production settings.
 - Separate build-time, server-runtime, and client-exposed configuration.
-- Treat feature flags as configuration with owners and expected removal paths, not as permanent branching clutter.
+- Treat feature flags as configuration with owners and expected removal paths.
+
+Example — typed config parsing:
+
+```ts
+import { z } from "zod";
+
+const ConfigSchema = z.object({
+  databaseUrl: z.string().url(),
+  port: z.coerce.number().int().min(1).max(65535).default(3000),
+  logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  stripeWebhookSecret: z.string().min(1),
+});
+
+export type AppConfig = z.infer<typeof ConfigSchema>;
+
+export function loadConfig(): AppConfig {
+  const result = ConfigSchema.safeParse(process.env);
+  if (!result.success) {
+    throw new Error(`Invalid configuration:\n${result.error.toString()}`);
+  }
+  return result.data;
+}
+```
 
 ## Constants
 
 Give important constants a domain home.
 
 - Put domain constants in a `constants.ts` file at the level of the domain, feature, module, or component that owns them.
-- This applies even when a domain constant currently has only one caller, if the value represents a business rule, protocol value, limit, timeout, default, storage key, route, or repeated UI dimension.
+- This applies even when a constant currently has only one caller, if the value represents a business rule, protocol value, limit, timeout, default, storage key, or route.
 - Keep purely local readability constants near the code that uses them.
 - Avoid magic numbers and magic strings in executable logic.
 - Name constants by their meaning, not by their value.
@@ -267,7 +296,24 @@ Keep UI code declarative, typed, and behavior-focused.
 - Do not mirror server data into local state unless the user can edit it locally or there is a clear synchronization plan.
 - Keep URL state, form state, server/cache state, and local UI state conceptually separate.
 - Use accessible semantic elements before custom div-based controls.
-- Test visible behavior, important states, and accessibility-relevant interactions instead of component internals.
+
+Example — discriminated union UI state:
+
+```tsx
+type SubmitState =
+  | { status: "idle" }
+  | { status: "submitting" }
+  | { status: "success"; confirmedId: string }
+  | { status: "error"; message: string };
+
+// Renders based on state rather than multiple booleans like isLoading, hasError, isSuccess
+function SubmitButton({ state }: { state: SubmitState }) {
+  if (state.status === "submitting") return <Spinner />;
+  if (state.status === "error") return <ErrorBanner message={state.message} />;
+  if (state.status === "success") return <Confirmation id={state.confirmedId} />;
+  return <button type="submit">Submit</button>;
+}
+```
 
 ## APIs And Public Contracts
 
@@ -285,30 +331,27 @@ Treat public contracts as promises.
 
 ## Security And Privacy
 
-Treat inputs, identity, and secrets with suspicion.
+Treat inputs, identity, and secrets with suspicion. Key TypeScript-specific checks:
 
-- Validate and normalize untrusted input before using it for behavior.
-- Keep authentication and authorization checks close to the operation they protect.
-- Do not rely on client-side checks for server-side authorization.
-- Include tenant/user ownership filters in data access paths where applicable; do not add them only at the UI layer.
-- Do not log secrets, tokens, credentials, private user data, or raw payloads that may contain them.
-- Avoid unsafe HTML injection. If HTML rendering is required, sanitize with a project-approved library and keep the boundary obvious.
-- Use parameterized database queries or the project's query builder; do not concatenate untrusted SQL.
+- Validate and narrow untrusted input at runtime boundaries with a schema library before it reaches domain code — static types give no runtime protection.
+- Keep authentication and authorization checks close to the operation they protect; do not rely on client-side checks for server-side authorization.
+- Include tenant/user ownership filters in data access paths where applicable.
+- Avoid unsafe HTML injection; if HTML rendering is required, sanitize with a project-approved library.
+- Use parameterized database queries or the project's query builder; do not concatenate user input into queries.
 - Be careful with redirects, file paths, shell commands, and URLs derived from user input.
 - Fail closed when permission, identity, or tenant context is missing or ambiguous.
+- Never log secrets, tokens, credentials, or private user data.
 
 ## Performance And Resource Use
 
-Do not optimize blindly, but avoid obviously wasteful shapes.
+Avoid obviously wasteful shapes; measure before making invasive changes.
 
 - Prefer simple code until there is evidence of a performance problem or the inefficient shape is obvious.
-- Avoid accidental N+1 database queries, API calls, filesystem reads, and expensive renders.
+- Avoid accidental N+1 queries, expensive renders, and unbounded loops over untrusted input.
 - Bound untrusted or potentially large work: pagination, limits, timeouts, streaming, batching, or backpressure.
 - Do not load large datasets, files, or response bodies into memory unless the size is known and acceptable.
 - Avoid blocking the event loop with heavy synchronous work on request, UI, or job hot paths.
 - Cache only when invalidation, ownership, and memory growth are understood.
-- Keep expensive derived values memoized or precomputed only when profiling, scale, or code structure justifies it.
-- Measure before making invasive performance changes.
 
 ## Review Mindset
 
