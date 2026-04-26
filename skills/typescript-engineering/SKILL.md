@@ -55,6 +55,7 @@ Code should live where its owner is obvious.
 - Do not let `helpers`, `utils`, `common`, `core`, `services`, or `managers` become catch-all locations for domain behavior.
 - Separate external boundaries from internal logic: parse and validate at the edge, then pass trusted typed values inward.
 - Keep framework glue thin. Route handlers, controllers, UI units, CLI commands, and workers should delegate meaningful domain work to named functions.
+- For non-trivial routes and jobs, keep the entrypoint responsible for request/job orchestration and move meaningful domain steps such as deduplication, persistence writes, eligibility decisions, fulfillment, or response shaping into named feature-owned functions.
 
 ## Types And Schemas
 
@@ -124,7 +125,7 @@ async function createUser(input: CreateUserInput): Promise<CreateUserOutcome> {
   if (!isValidInvite(input.inviteCode)) return { status: "invalid_invite" };
   const user = await db.users.insert(input);
   return { status: "created", user };
-+}
+}
 ```
 
 ## Runtime Boundaries And Validation
@@ -139,6 +140,7 @@ Guidelines:
 - Keep boundary schemas close to the boundary or domain that owns the contract.
 - Parse once at the edge, then pass trusted typed values inward.
 - Normalize awkward external shapes into cleaner internal types at the boundary.
+- When an external field can be `null` but internal code only needs absence, accept it at the boundary and transform it to `undefined`; preserve the raw payload separately if audit/debugging requires the original value.
 - Do not repeatedly re-validate trusted internal values through every layer.
 - Prefer explicit schema failures over defensive optional chaining deep in domain code.
 - Preserve raw external payloads when auditability or debugging matters.
@@ -161,18 +163,32 @@ export function parseWebhookPayload(raw: unknown): WebhookPayload {
 }
 ```
 
+Example — normalize external nulls at the boundary:
+
+```ts
+const optionalTextFromApi = z.string().nullish().transform((value) => value ?? undefined);
+
+const PartnerCustomerSchema = z.object({
+  email: z.string().email(),
+  displayName: optionalTextFromApi,
+});
+```
+
 ## Async, Effects, And State
 
 Make side effects visible and intentional.
 
 - Keep network, filesystem, database, clock, random, and process-level effects near adapters or clearly named functions.
-- Pass dependencies explicitly when it improves testability or makes effects clearer.
+- Pass dependencies explicitly when it improves testability or makes effects clearer, including fetch clients, repositories, loggers, clocks, timers/sleep functions, and persistence calls on retrying or scheduled workflows.
 - Avoid hidden module-level mutable state unless it is truly process-wide configuration or a managed cache.
 - Use `async`/`await` for readable control flow; use promise chains only when they are clearer for composition.
 - Always handle or return promises; do not leave floating promises.
 - Use cancellation, timeouts, or abort signals for external calls when the path can hang or outlive its caller.
-- Make retries, backoff, and idempotency explicit around external side effects.
+- Make retries, backoff, and idempotency explicit around external side effects. If code classifies an error as retryable, it should normally perform bounded retry attempts with a named delay/backoff policy and tests that prove retryable failures are retried while non-retryable failures are not.
 - Be careful with `Promise.all`: it is for independent work, not work that depends on sequencing or shared mutation.
+- Bound large or untrusted async workloads deliberately with batch size, pagination, streaming, a concurrency limit, or sequential processing with an explicit input limit. Sequential processing bounds concurrency, but it does not by itself bound total work; independent item work often benefits from a small explicit concurrency limit rather than one-at-a-time processing or unbounded `Promise.all`.
+- Do not run `Promise.all` or `Promise.allSettled` directly over an untrusted or potentially large input array. Use a small worker pool, batch loop, pagination, or a named `MAX_*` input limit so total work and in-flight work are both bounded.
+- For jobs over caller-provided arrays, define the run boundary explicitly: a maximum items-per-run, page size, batch size, or concurrency limit with a domain constant and test coverage. Concurrency of `1` is still a policy and should be named when chosen deliberately.
 - Keep derived state derived; do not store duplicate mutable state without a clear synchronization plan.
 
 ## Data Modeling And Persistence
@@ -181,13 +197,15 @@ Do not pretend that every layer has the same data shape.
 
 - Distinguish external DTOs, persistence records, domain objects, and UI/view models when their meanings differ.
 - Avoid one giant `User`, `Order`, or `Config` type reused across unrelated boundaries.
-- Store durable data with enough version, timestamp, and source metadata to explain where it came from.
+- Store durable data with enough stable identifiers, schema version, batch/run identifier when relevant, timestamp, source, and source-position metadata to explain where it came from.
 - Treat persisted historical inputs and raw external outputs as append-only unless the domain explicitly allows correction.
-- Prefer explicit migrations or transformation functions when a stored shape changes.
+- Prefer explicit migrations, deserializers, or transformation functions when a stored shape changes; do not silently reinterpret old persisted records inline. A versioned persisted record should have a named path such as `migrateStoredCustomer`, `deserializeImportRecord`, or `toCustomerSnapshot`.
+- When introducing persisted import/history records, include a named storage schema version and a migration or deserialization function even if only the current version exists today. Tests should prove current records can be read through that path.
+- Rejecting an unknown stored version is not the same as migration. If historical records may exist, provide a current-version projection path and a clear `switch` or migration function where older versions can be transformed into the current shape.
 - Keep serialization and deserialization near the boundary that owns the format.
 - Do not let database nullability, API awkwardness, or UI convenience leak through every layer.
-- Use stable identifiers and explicit timestamps instead of relying on array positions, object key order, or implicit runtime timing.
-- Use `readonly` for data that should not be mutated after construction, especially shared config, parsed inputs, and domain snapshots.
+- Use stable identifiers and explicit timestamps for correlation and ordering instead of relying on array positions, object key order, or implicit runtime timing.
+- Use `readonly` for data that should not be mutated after construction, especially shared config, parsed inputs, persisted history entries, and domain snapshots returned to callers.
 
 ## Naming And Readability
 
@@ -206,7 +224,8 @@ Names should make code review easier.
 
 Make module relationships explicit and boring.
 
-- Prefer named exports for application code. Avoid default exports except where the framework or existing convention expects them.
+- Prefer named exports for application code, including React components, feature helpers, route handlers, jobs, and domain functions. Avoid default exports except where the framework or existing convention expects them.
+- When project instructions require named exports, update local call sites to use named imports instead of adding a compatibility default export by habit. Keep a default export only when a real framework or public compatibility boundary requires it.
 - Avoid broad `export *` barrel files that hide ownership or expose internals. A barrel is acceptable when it is a narrow, intentional public API for a module.
 - Keep dependency direction clear: framework glue may call domain code, but domain code should not import framework glue.
 - Do not introduce a package for something the standard library or existing dependency already handles well.
@@ -225,7 +244,7 @@ Use tests and tooling to protect behavior, not to decorate the repo.
 - Test public behavior and important invariants more than private implementation details.
 - Mock at external boundaries; avoid mocking the function you are trying to prove.
 - For UI code, test user-visible behavior and accessibility-relevant states instead of component internals.
-- Keep tests deterministic: control time, randomness, network, filesystem, and concurrency.
+- Keep tests deterministic: control time, randomness, network, filesystem, and concurrency. Retry, timeout, and backoff tests should inject a clock/sleep dependency or use fake timers instead of waiting for real elapsed time.
 - Do not chase coverage numbers before the core behavior is trustworthy.
 - If a change cannot be tested cheaply, explain what was verified manually and what risk remains.
 
@@ -279,8 +298,10 @@ export function loadConfig(): AppConfig {
 
 Give important constants a domain home.
 
-- Put domain constants in a `constants.ts` file at the level of the domain, feature, module, or component that owns them.
+- Put domain constants in a `constants.ts` file at the level of the domain, feature, module, or component that owns them, and export them with meaning-based names.
 - This applies even when a constant currently has only one caller, if the value represents a business rule, protocol value, limit, timeout, default, storage key, or route.
+- Schema bounds, HTTP status codes, retry counts, timeout durations, batch sizes, event names, table/storage keys, and externally visible protocol strings are usually domain constants, not incidental literals.
+- Before finishing, scan changed executable code and schemas for remaining magic literals. Extract owner-level constants for business and protocol values instead of leaving `.min(1)`, status codes, retry counts, table names, event names, and limits inline.
 - Keep purely local readability constants near the code that uses them.
 - Avoid magic numbers and magic strings in executable logic.
 - Name constants by their meaning, not by their value.
@@ -292,6 +313,7 @@ Keep UI code declarative, typed, and behavior-focused.
 - UI units should express structure, rendering, and user interactions; move non-trivial domain logic, data shaping, and policy decisions into named feature-owned functions.
 - Model UI state as the smallest state that cannot be derived from props, server data, URL state, or existing application state.
 - Prefer discriminated unions for async and multi-mode UI states instead of several loosely related booleans.
+- Render discriminated UI states with a `switch` or exhaustive render helper; avoid independent `&&` branches or loose ternary chains that TypeScript cannot check when a new variant is added.
 - Keep event handlers small; delegate meaningful work to named functions.
 - Do not mirror server data into local state unless the user can edit it locally or there is a clear synchronization plan.
 - Keep URL state, form state, server/cache state, and local UI state conceptually separate.
@@ -308,10 +330,20 @@ type SubmitState =
 
 // Renders based on state rather than multiple booleans like isLoading, hasError, isSuccess
 function SubmitButton({ state }: { state: SubmitState }) {
-  if (state.status === "submitting") return <Spinner />;
-  if (state.status === "error") return <ErrorBanner message={state.message} />;
-  if (state.status === "success") return <Confirmation id={state.confirmedId} />;
-  return <button type="submit">Submit</button>;
+  switch (state.status) {
+    case "idle":
+      return <button type="submit">Submit</button>;
+    case "submitting":
+      return <Spinner />;
+    case "success":
+      return <Confirmation id={state.confirmedId} />;
+    case "error":
+      return <ErrorBanner message={state.message} />;
+    default: {
+      const exhaustive: never = state;
+      return exhaustive;
+    }
+  }
 }
 ```
 
@@ -366,3 +398,5 @@ Before finishing a meaningful change, check the engineering story.
 - Are important inputs, outputs, timestamps, versions, and source metadata preserved where relevant?
 - What deterministic checks or focused tests prove the change?
 - What remains unverified, and is that acceptable for the risk?
+
+When producing a TypeScript code review, write findings first and ground each one in a specific file and line or tight line range. Prioritize correctness, security, validation, async behavior, public contracts, type soundness, and missing focused tests. Explicitly look for unchecked request bodies, unsafe `as` assertions, `any`, `unknown[]` escaping from adapters, exported function contracts, response shapes, external service payloads, and error propagation contracts. Always consider whether the change needs tests for request parsing, permissions or tenant isolation, state transitions, migrations, retry/failure paths, and public behavior; if tests are missing, call that out as a finding or in a clearly separated test-gap note. Keep open questions or assumptions separate from findings, and keep any summary last.
