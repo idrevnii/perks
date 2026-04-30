@@ -89,6 +89,15 @@ Use `type` by default.
 - Use `interface` only for an intentional public contract meant to be extended, implemented, augmented, or consumed across module boundaries.
 - Keep types explicit enough to communicate domain meaning without adding clever type machinery.
 
+## Schemas And Type Files
+
+Separate reusable schemas and types into obvious local files.
+
+- Put reusable validation schemas in `schemas.ts`.
+- Put reusable TypeScript types in `types.ts`.
+- Do not split prematurely: keep a schema or type next to the code that uses it when it is a single local definition and/or is not used anywhere else.
+- Prefer feature-local `schemas.ts` and `types.ts` files over broad shared files unless the definitions are genuinely shared across features.
+
 ## Errors And Recoverable Failures
 
 Prefer explicit tagged errors for recoverable async operations.
@@ -126,5 +135,6 @@ Before finishing a change, scan for style drift:
 - Is reusable infrastructure in a shared module rather than copied into feature code?
 - Are module exports concrete named functions, with grouping only where useful?
 - Are local shapes modeled with `type` unless an extensible public contract is intended?
+- Are reusable validation schemas in `schemas.ts` and reusable TypeScript types in `types.ts`, without splitting single/local-only definitions prematurely?
 - Are recoverable I/O and validation failures represented with explicit tagged outcomes, and is validation clear at external boundaries?
 - Is runtime validation clear at external boundaries?
