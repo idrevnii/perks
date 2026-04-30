@@ -1,0 +1,11 @@
+{
+    "name": "base/simple-typescript",
+    "version": "0.1.0",
+    "private": true,
+    "summary": "Apply direct, functional TypeScript and JavaScript coding style preferences. Use when writing, editing, reviewing, or refactoring TS/JS code; deciding whether to introduce classes, factories, helpers, wrappers, utilities, shared modules, types vs interfaces, validation boundaries, or recoverable error handling; or when the user asks for code that matches these personal style preferences.",
+    "skills": {
+        "simple-typescript": {
+            "path": "SKILL.md"
+        }
+    }
+}
